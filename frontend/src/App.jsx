@@ -5,8 +5,25 @@ function App() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [profiles, setProfiles] = useState([])
+  const [selectedProfile, setSelectedProfile] = useState('default')
   
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
+  useEffect(() => {
+    const fetchProfiles = async () => {
+      try {
+        const res = await fetch(`${apiUrl}/profiles`)
+        if (res.ok) {
+          const data = await res.json()
+          setProfiles(data)
+        }
+      } catch (err) {
+        console.error("Failed to fetch profiles:", err)
+      }
+    }
+    fetchProfiles()
+  }, [apiUrl])
 
   const sendMessage = async (e) => {
     e.preventDefault()
@@ -22,7 +39,10 @@ function App() {
       const res = await fetch(`${apiUrl}/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: userMessage.content })
+        body: JSON.stringify({ 
+          prompt: userMessage.content,
+          profile_name: selectedProfile
+        })
       })
       const { task_id } = await res.json()
 
@@ -58,8 +78,26 @@ function App() {
     <div className="app-container">
       <header className="glass-header">
         <h1>Antigravity Agent</h1>
-        <div className="status-badge">
-          <span className="pulse-dot"></span> Online
+        <div className="header-controls">
+          <select 
+            className="profile-selector glass-select"
+            value={selectedProfile} 
+            onChange={(e) => setSelectedProfile(e.target.value)}
+            title="Select Agent Profile"
+          >
+            {profiles.length > 0 ? (
+              profiles.map(p => (
+                <option key={p.name} value={p.name}>
+                  {p.name.charAt(0).toUpperCase() + p.name.slice(1)} Agent
+                </option>
+              ))
+            ) : (
+              <option value="default">Default Agent</option>
+            )}
+          </select>
+          <div className="status-badge">
+            <span className="pulse-dot"></span> Online
+          </div>
         </div>
       </header>
       

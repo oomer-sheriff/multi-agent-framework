@@ -64,6 +64,36 @@ body {
   border-radius: 1rem;
 }
 
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.profile-selector {
+  background: var(--glass-bg);
+  color: var(--text-main);
+  border: 1px solid var(--glass-border);
+  padding: 0.4rem 1rem;
+  border-radius: 1rem;
+  font-size: 0.875rem;
+  font-family: inherit;
+  outline: none;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  transition: all 0.2s ease;
+}
+
+.profile-selector:hover, .profile-selector:focus {
+  border-color: rgba(139, 92, 246, 0.5);
+  box-shadow: 0 0 10px rgba(139, 92, 246, 0.1);
+}
+
+.profile-selector option {
+  background: var(--bg-dark);
+  color: var(--text-main);
+}
+
 .pulse-dot {
   width: 8px;
   height: 8px;

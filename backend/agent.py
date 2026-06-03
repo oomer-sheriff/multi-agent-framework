@@ -18,7 +18,7 @@ class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], operator.add]
 
 # Determine the model from env, default to gemini
-MODEL_NAME = os.environ.get("LLM_MODEL", "gemini/gemini-3.5-flash")
+MODEL_NAME = os.environ.get("LLM_MODEL", "gemini/gemini-3.1-flash")
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8001/mcp")
 
 # Initialize ChatLiteLLM
