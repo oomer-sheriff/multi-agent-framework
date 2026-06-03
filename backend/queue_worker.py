@@ -5,6 +5,9 @@ from redis.exceptions import ResponseError
 import json
 import logging
 from agent import invoke_agent
+from db import AsyncSessionLocal
+from models import Profile
+from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -41,11 +44,20 @@ async def process_tasks():
                             # Process the message
                             task_id = message_data.get(b"task_id").decode("utf-8")
                             prompt = message_data.get(b"prompt").decode("utf-8")
+                            profile_name = message_data.get(b"profile_name", b"default").decode("utf-8")
                             
-                            logger.info(f"Processing task {task_id}: {prompt}")
+                            logger.info(f"Processing task {task_id}: {prompt} with profile {profile_name}")
+                            
+                            # Fetch Profile from DB
+                            async with AsyncSessionLocal() as session:
+                                result = await session.execute(select(Profile).where(Profile.name == profile_name))
+                                profile = result.scalars().first()
+                                
+                            if not profile:
+                                raise ValueError(f"Profile {profile_name} not found")
                             
                             # Invoke LangGraph agent
-                            result = await invoke_agent(prompt)
+                            result = await invoke_agent(prompt, profile=profile)
                             
                             # Save result to Redis Hash
                             await redis_client.hset(

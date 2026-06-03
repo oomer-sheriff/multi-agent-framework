@@ -1,11 +1,16 @@
 import os
 import uuid
 import asyncio
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import redis.asyncio as redis
 from queue_worker import process_tasks
+from db import get_db
+from models import Profile
+from init_db import init_db
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 app = FastAPI(title="LangGraph Agent API")
 
@@ -24,12 +29,15 @@ STREAM_NAME = "agent_tasks"
 
 class TaskRequest(BaseModel):
     prompt: str
+    profile_name: str = "default"
 
 class TaskResponse(BaseModel):
     task_id: str
 
 @app.on_event("startup")
 async def startup_event():
+    # Initialize Database
+    await init_db()
     # Start the background worker
     asyncio.create_task(process_tasks())
 
@@ -46,7 +54,7 @@ async def create_task(request: TaskRequest):
     # Push to redis stream
     await redis_client.xadd(
         STREAM_NAME,
-        {"task_id": task_id, "prompt": request.prompt}
+        {"task_id": task_id, "prompt": request.prompt, "profile_name": request.profile_name}
     )
     
     return {"task_id": task_id}
@@ -66,3 +74,32 @@ async def get_task_status(task_id: str):
 @app.get("/")
 def health_check():
     return {"status": "ok"}
+
+class ProfileCreate(BaseModel):
+    name: str
+    system_prompt: str
+    mcp_servers: list[str] = []
+    workflow_config: dict
+
+@app.post("/profiles")
+async def create_profile(profile: ProfileCreate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Profile).where(Profile.name == profile.name))
+    if result.scalars().first():
+        raise HTTPException(status_code=400, detail="Profile already exists")
+    
+    db_profile = Profile(
+        name=profile.name,
+        system_prompt=profile.system_prompt,
+        mcp_servers=profile.mcp_servers,
+        workflow_config=profile.workflow_config
+    )
+    db.add(db_profile)
+    await db.commit()
+    return {"status": "success", "profile": profile.name}
+
+@app.get("/profiles")
+async def get_profiles(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Profile))
+    profiles = result.scalars().all()
+    return [{"name": p.name, "workflow_config": p.workflow_config} for p in profiles]
+

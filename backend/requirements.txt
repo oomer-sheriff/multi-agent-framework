@@ -9,3 +9,7 @@ langchain-litellm>=0.1.0
 pydantic>=2.7.4
 asyncio>=3.4.3
 langchain-mcp-adapters>=0.1.0
+sqlalchemy[asyncio]>=2.0.30
+asyncpg>=0.29.0
+greenlet>=3.0.3
+pgvector>=0.2.5
