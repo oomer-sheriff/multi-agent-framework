@@ -1,0 +1,48 @@
+version: '3.8'
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  agent-backend:
+    build: 
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - MCP_SERVER_URL=http://mcp-server:8001/sse
+    depends_on:
+      - redis
+      - mcp-server
+    volumes:
+      - ./backend:/app
+
+  mcp-server:
+    build:
+      context: ./mcp-tools
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./mcp-tools:/app
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - agent-backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+volumes:
+  redis_data:

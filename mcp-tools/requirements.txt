@@ -1,0 +1,5 @@
+fastmcp>=2.0.0
+duckduckgo-search>=6.0.0
+requests>=2.30.0
+uvicorn>=0.30.0
+sse-starlette>=2.0.0
