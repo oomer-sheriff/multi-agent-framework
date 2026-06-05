@@ -84,13 +84,18 @@ async def setup_agent(profile: Profile):
     # Handlers for dynamic nodes
     async def run_agent(state: AgentState):
         messages = state['messages']
+        logger.info(f"[run_agent] Input messages: {[m.content for m in messages if hasattr(m, 'content')]}")
         response = await agent_llm.ainvoke(messages)
+        logger.info(f"[run_agent] Output response: {response.content if hasattr(response, 'content') else str(response)}")
         return {"messages": [response]}
         
     async def run_planner(state: AgentState):
         messages = state['messages']
         planner_llm = agent_llm.with_structured_output(Plan)
+        prompt = messages[-1].content
+        logger.info(f"[run_planner] Creating plan for prompt: {prompt}")
         plan = await planner_llm.ainvoke(messages)
+        logger.info(f"[run_planner] Generated plan: {plan}")
         return {"plan": [s.model_dump() for s in plan.subtasks]}
         
     async def run_dispatcher(state: AgentState, config: RunnableConfig):
@@ -104,6 +109,11 @@ async def setup_agent(profile: Profile):
             return {"results": []}
             
         plan = state.get('plan', [])
+        if not plan:
+            logger.warning("[run_dispatcher] No plan found in state!")
+            return {"messages": [AIMessage(content="I couldn't create a plan.")]}
+            
+        logger.info(f"[run_dispatcher] Dispatching {len(plan)} subtasks for {task_id}")
         
         # Check if we already have subtasks for this task_id
         async with AsyncSessionLocal() as session:
@@ -111,7 +121,6 @@ async def setup_agent(profile: Profile):
             existing_subtasks = res.scalars().all()
             
         if not existing_subtasks:
-            logger.info(f"Dispatching {len(plan)} subtasks for {task_id}")
             async with AsyncSessionLocal() as session:
                 for subtask in plan:
                     subtask_id = str(uuid.uuid4())
@@ -310,4 +319,19 @@ async def invoke_agent(prompt: str, history: list = None, profile: Profile = Non
         return "Processing subtasks..."
         
     ai_response = last_message.content if hasattr(last_message, 'content') else str(last_message)
+    
+    # Langchain message content can sometimes be a list of blocks (e.g., Gemini)
+    if isinstance(ai_response, list):
+        text_parts = []
+        for part in ai_response:
+            if isinstance(part, dict) and "text" in part:
+                text_parts.append(part["text"])
+            elif isinstance(part, str):
+                text_parts.append(part)
+            else:
+                text_parts.append(str(part))
+        ai_response = "\n".join(text_parts)
+    elif not isinstance(ai_response, str):
+        ai_response = str(ai_response)
+        
     return ai_response

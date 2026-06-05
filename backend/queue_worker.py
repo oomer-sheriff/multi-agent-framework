@@ -117,6 +117,13 @@ async def process_tasks():
                                         select(SubtaskItem).where(SubtaskItem.parent_task_id == parent_task_id)
                                     )
                                     siblings = res.scalars().all()
+                                    
+                                    # LOG EXACT STATUSES
+                                    status_counts = {}
+                                    for s in siblings:
+                                        status_counts[s.status] = status_counts.get(s.status, 0) + 1
+                                    logger.info(f"Siblings status for {parent_task_id}: {status_counts}")
+                                    
                                     all_finished = all(s.status in ["complete", "failed"] for s in siblings)
                                     
                                 if all_finished:
@@ -133,7 +140,22 @@ async def process_tasks():
                                     
                                     # Extract the final result from the orchestrator's state
                                     final_result_message = final_state['messages'][-1]
-                                    final_result = final_result_message.content if hasattr(final_result_message, 'content') else str(final_result_message)
+                                    final_result_content = final_result_message.content if hasattr(final_result_message, 'content') else str(final_result_message)
+                                    
+                                    if isinstance(final_result_content, list):
+                                        text_parts = []
+                                        for part in final_result_content:
+                                            if isinstance(part, dict) and "text" in part:
+                                                text_parts.append(part["text"])
+                                            elif isinstance(part, str):
+                                                text_parts.append(part)
+                                            else:
+                                                text_parts.append(str(part))
+                                        final_result = "\n".join(text_parts)
+                                    elif not isinstance(final_result_content, str):
+                                        final_result = str(final_result_content)
+                                    else:
+                                        final_result = final_result_content
                                     
                                     # Write final result to Redis hash
                                     await redis_client.hset(
