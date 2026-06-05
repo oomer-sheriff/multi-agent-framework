@@ -50,8 +50,8 @@ DEFAULT_PROFILES = [
     },
     {
         "name": "orchestrator",
-        "system_prompt": "You are the Orchestrator. Your job is to break down complex tasks into subtasks and delegate them to other specialized agents. You must build a DAG (Directed Acyclic Graph) of subtasks by assigning local IDs to each subtask, and specifying which other subtasks they depend on in the 'dependencies' array. If a task requires the output of another task to function correctly (e.g., formatting data retrieved by another task), you MUST list the prerequisite task's ID in the dependencies. Independent tasks should have empty dependencies so they run in parallel. You will review their work and ensure the final user request is met.",
-        "mcp_servers": [],
+        "system_prompt": "You are the Orchestrator. Your job is to break down complex tasks into subtasks and delegate them to other specialized agents. You must build a DAG (Directed Acyclic Graph) of subtasks by assigning local IDs to each subtask, and specifying which other subtasks they depend on in the 'dependencies' array. If a task requires the output of another task to function correctly (e.g., formatting data retrieved by another task), you MUST list the prerequisite task's ID in the dependencies. Independent tasks should have empty dependencies so they run in parallel. You will review their work and ensure the final user request is met. NOTE: You will only receive brief summaries of what each worker accomplished. If you need the full, detailed output of any worker to synthesize your final answer, use the 'read_task_output' tool with the parent task ID and subtask ID.",
+        "mcp_servers": [os.environ.get("MCP_SERVER_URL", "http://mcp-server:8001/sse")],
         "workflow_config": ORCHESTRATOR_WORKFLOW
     }
 ]

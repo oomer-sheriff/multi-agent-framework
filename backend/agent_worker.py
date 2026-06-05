@@ -70,10 +70,30 @@ async def process_tasks():
                                 
                                 if parent_task_id and subtask_id:
                                     ensure_bucket()
+                                    
+                                    # Summarize the raw result
+                                    try:
+                                        from litellm import acompletion
+                                        model_name = os.environ.get("LLM_MODEL", "gemini/gemini-1.5-flash-latest")
+                                        sum_resp = await acompletion(
+                                            model=model_name,
+                                            messages=[{"role": "user", "content": f"Create a concise, 200-word index/summary of the following data to be used by downstream agents. Only mention what data exists and the core conclusions. Do not hallucinate.\n\nRaw Data:\n{result}"}]
+                                        )
+                                        summary = sum_resp.choices[0].message.content
+                                    except Exception as sum_e:
+                                        logger.error(f"Summarization failed: {sum_e}")
+                                        summary = result[:1000] # fallback
+                                        
+                                    # Upload raw data
                                     obj_name = f"{parent_task_id}/{subtask_id}.txt"
                                     result_bytes = result.encode('utf-8')
                                     minio_client.put_object("agent-outputs", obj_name, io.BytesIO(result_bytes), len(result_bytes))
                                     s3_url = f"s3://agent-outputs/{obj_name}"
+                                    
+                                    # Upload summary
+                                    summary_obj_name = f"{parent_task_id}/{subtask_id}_summary.txt"
+                                    summary_bytes = summary.encode('utf-8')
+                                    minio_client.put_object("agent-outputs", summary_obj_name, io.BytesIO(summary_bytes), len(summary_bytes))
                                     
                                     async with AsyncSessionLocal() as session:
                                         await session.execute(update(SubtaskItem).where(SubtaskItem.id == subtask_id).values(status="complete", s3_url=s3_url))
@@ -127,10 +147,10 @@ async def process_tasks():
                                         for d in task.dependencies:
                                             dep_task = sibling_map.get(d)
                                             if dep_task and dep_task.s3_url:
-                                                obj_name = dep_task.s3_url.replace("s3://agent-outputs/", "")
+                                                summary_obj_name = dep_task.s3_url.replace("s3://agent-outputs/", "").replace(".txt", "_summary.txt")
                                                 try:
-                                                    resp = minio_client.get_object("agent-outputs", obj_name)
-                                                    context_texts.append(f"--- Output of prerequisite task '{dep_task.description}': ---\n{resp.read().decode('utf-8')}")
+                                                    resp = minio_client.get_object("agent-outputs", summary_obj_name)
+                                                    context_texts.append(f"--- Summary of prerequisite task '{dep_task.description}' (Subtask ID: {d}): ---\n{resp.read().decode('utf-8')}")
                                                 except Exception as e:
                                                     pass
                                                 finally:
@@ -142,7 +162,8 @@ async def process_tasks():
                                         
                                         enriched_prompt = task.description
                                         if context_texts:
-                                            enriched_prompt += "\n\nContext from prerequisite tasks:\n" + "\n\n".join(context_texts)
+                                            enriched_prompt += "\n\nContext Summaries from prerequisite tasks:\n" + "\n\n".join(context_texts)
+                                            enriched_prompt += f"\n\nNOTE: You only have summaries of the prerequisite tasks. If you require the FULL granular output of any prerequisite task, use the 'read_task_output' tool with the parent_task_id '{parent_task_id}' and the subtask_id of the required task."
                                             
                                         await redis_client.xadd("worker_tasks", {
                                             "task_id": task.id,
