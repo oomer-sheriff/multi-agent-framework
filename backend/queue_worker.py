@@ -117,6 +117,57 @@ async def process_tasks():
                                         select(SubtaskItem).where(SubtaskItem.parent_task_id == parent_task_id)
                                     )
                                     siblings = res.scalars().all()
+                                    sibling_map = {s.id: s for s in siblings}
+                                    
+                                    newly_ready = []
+                                    changed = True
+                                    while changed:
+                                        changed = False
+                                        for s in siblings:
+                                            if s.status == "waiting" and s.dependencies:
+                                                dep_statuses = [sibling_map[d].status for d in s.dependencies if d in sibling_map]
+                                                if "failed" in dep_statuses:
+                                                    s.status = "failed"
+                                                    await session.execute(update(SubtaskItem).where(SubtaskItem.id == s.id).values(status="failed"))
+                                                    changed = True
+                                                elif all(status == "complete" for status in dep_statuses):
+                                                    s.status = "queued"
+                                                    await session.execute(update(SubtaskItem).where(SubtaskItem.id == s.id).values(status="queued"))
+                                                    newly_ready.append(s)
+                                                    changed = True
+                                    await session.commit()
+                                    
+                                    # Queue newly ready tasks with context from prerequisites
+                                    for task in newly_ready:
+                                        context_texts = []
+                                        for d in task.dependencies:
+                                            dep_task = sibling_map.get(d)
+                                            if dep_task and dep_task.s3_url:
+                                                obj_name = dep_task.s3_url.replace("s3://agent-outputs/", "")
+                                                try:
+                                                    resp = minio_client.get_object("agent-outputs", obj_name)
+                                                    context_texts.append(f"--- Output of prerequisite task '{dep_task.description}': ---\n{resp.read().decode('utf-8')}")
+                                                except Exception as e:
+                                                    logger.error(f"Error fetching dependency output for {d}: {e}")
+                                                finally:
+                                                    try:
+                                                        resp.close()
+                                                        resp.release_conn()
+                                                    except:
+                                                        pass
+                                        
+                                        enriched_prompt = task.description
+                                        if context_texts:
+                                            enriched_prompt += "\n\nContext from prerequisite tasks:\n" + "\n\n".join(context_texts)
+                                            
+                                        logger.info(f"Queueing dependent task {task.id} with context from {len(task.dependencies)} prerequisites.")
+                                        await redis_client.xadd("agent_tasks", {
+                                            "task_id": task.id,
+                                            "parent_task_id": parent_task_id,
+                                            "subtask_id": task.id,
+                                            "prompt": enriched_prompt,
+                                            "profile_name": task.profile_name
+                                        })
                                     
                                     # LOG EXACT STATUSES
                                     status_counts = {}
@@ -124,6 +175,7 @@ async def process_tasks():
                                         status_counts[s.status] = status_counts.get(s.status, 0) + 1
                                     logger.info(f"Siblings status for {parent_task_id}: {status_counts}")
                                     
+                                    # Check if ALL siblings are finished (complete or failed)
                                     all_finished = all(s.status in ["complete", "failed"] for s in siblings)
                                     
                                 if all_finished:

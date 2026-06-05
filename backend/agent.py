@@ -23,8 +23,11 @@ redis_client = redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:637
 logger = logging.getLogger(__name__)
 
 class Subtask(BaseModel):
-    description: str = Field(description="The task to perform")
-    profile: str = Field(description="The agent profile to use (e.g., 'researcher' or 'default')")
+    """A subtask that needs to be executed."""
+    id: str = Field(description="A unique local identifier for this subtask (e.g., 'task_1')")
+    description: str = Field(description="A detailed prompt describing what the agent should do.")
+    profile_name: str = Field(description="The name of the profile/agent to assign this task to (e.g. 'researcher').")
+    dependencies: list[str] = Field(default_factory=list, description="List of local subtask IDs that must complete before this subtask starts. Leave empty if the task can start immediately.")
 
 class Plan(BaseModel):
     subtasks: list[Subtask] = Field(description="List of subtasks to complete the goal")
@@ -122,28 +125,47 @@ async def setup_agent(profile: Profile):
             
         if not existing_subtasks:
             async with AsyncSessionLocal() as session:
+                # Map LLM generated local IDs to global UUIDs
+                id_map = {}
                 for subtask in plan:
-                    subtask_id = str(uuid.uuid4())
+                    if 'id' in subtask:
+                        id_map[subtask['id']] = str(uuid.uuid4())
+                
+                for subtask in plan:
+                    local_id = subtask.get('id', '')
+                    subtask_id = id_map.get(local_id, str(uuid.uuid4()))
                     
-                    res = await session.execute(select(Profile).where(Profile.name == subtask['profile']))
+                    profile_name = subtask.get('profile_name', 'default')
+                    res = await session.execute(select(Profile).where(Profile.name == profile_name))
                     worker_profile = res.scalars().first()
                     p_name = worker_profile.name if worker_profile else "default"
+                    
+                    # Resolve dependencies
+                    local_deps = subtask.get('dependencies', [])
+                    global_deps = [id_map[d] for d in local_deps if d in id_map]
                     
                     item = SubtaskItem(
                         id=subtask_id,
                         parent_task_id=task_id,
                         description=subtask['description'],
-                        profile_name=p_name
+                        profile_name=p_name,
+                        dependencies=global_deps
                     )
+                    
+                    if not global_deps:
+                        item.status = "queued"
+                        
                     session.add(item)
                     
-                    await redis_client.xadd("agent_tasks", {
-                        "task_id": subtask_id,
-                        "parent_task_id": task_id,
-                        "subtask_id": subtask_id,
-                        "prompt": subtask['description'],
-                        "profile_name": p_name
-                    })
+                    # Only queue tasks with NO dependencies immediately
+                    if not global_deps:
+                        await redis_client.xadd("agent_tasks", {
+                            "task_id": subtask_id,
+                            "parent_task_id": task_id,
+                            "subtask_id": subtask_id,
+                            "prompt": subtask['description'],
+                            "profile_name": p_name
+                        })
                 await session.commit()
                 
             interrupt("Waiting for workers to finish")

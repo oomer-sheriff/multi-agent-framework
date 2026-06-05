@@ -19,4 +19,5 @@ class SubtaskItem(Base):
     description = Column(Text, nullable=False)
     profile_name = Column(String, nullable=False)
     status = Column(String, nullable=False, default="waiting")
+    dependencies = Column(JSON, nullable=False, default=list)
     s3_url = Column(String, nullable=True)
