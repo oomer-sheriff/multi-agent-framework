@@ -10,7 +10,6 @@ from models import Profile, SubtaskItem
 from sqlalchemy import select, update
 from minio import Minio
 import io
-from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -29,9 +28,9 @@ def ensure_bucket():
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 redis_client = redis.from_url(REDIS_URL)
 
-STREAM_NAME = "agent_tasks"
-GROUP_NAME = "agent_group"
-CONSUMER_NAME = "worker_1"
+STREAM_NAME = "worker_tasks"
+GROUP_NAME = "worker_group"
+CONSUMER_NAME = "agent_worker_1"
 
 async def setup_redis():
     try:
@@ -42,11 +41,10 @@ async def setup_redis():
 
 async def process_tasks():
     await setup_redis()
-    logger.info("Started Queue Worker...")
+    logger.info("Started Agent Worker...")
     
     while True:
         try:
-            # Read messages from the stream
             response = await redis_client.xreadgroup(
                 GROUP_NAME, CONSUMER_NAME, {STREAM_NAME: ">"}, count=1, block=2000
             )
@@ -55,45 +53,30 @@ async def process_tasks():
                 for stream, messages in response:
                     for message_id, message_data in messages:
                         try:
-                            # Process the message
                             task_id = message_data.get(b"task_id").decode("utf-8")
                             prompt = message_data.get(b"prompt").decode("utf-8")
                             profile_name = message_data.get(b"profile_name", b"default").decode("utf-8")
                             parent_task_id = message_data.get(b"parent_task_id", b"").decode("utf-8") if b"parent_task_id" in message_data else None
                             subtask_id = message_data.get(b"subtask_id", b"").decode("utf-8") if b"subtask_id" in message_data else None
                             
-                            logger.info(f"Processing task {task_id}: {prompt} with profile {profile_name}")
+                            logger.info(f"Processing subtask {task_id}: {prompt} with profile {profile_name}")
                             
-                            # Fetch Profile from DB
                             async with AsyncSessionLocal() as session:
                                 result = await session.execute(select(Profile).where(Profile.name == profile_name))
                                 profile = result.scalars().first()
                                 
-                            if not profile:
-                                raise ValueError(f"Profile {profile_name} not found")
-                            
                             try:
-                                # Invoke LangGraph agent
                                 result = await invoke_agent(prompt, profile=profile, task_id=task_id)
                                 
                                 if parent_task_id and subtask_id:
                                     ensure_bucket()
                                     obj_name = f"{parent_task_id}/{subtask_id}.txt"
                                     result_bytes = result.encode('utf-8')
-                                    minio_client.put_object(
-                                        "agent-outputs",
-                                        obj_name,
-                                        io.BytesIO(result_bytes),
-                                        len(result_bytes)
-                                    )
+                                    minio_client.put_object("agent-outputs", obj_name, io.BytesIO(result_bytes), len(result_bytes))
                                     s3_url = f"s3://agent-outputs/{obj_name}"
                                     
                                     async with AsyncSessionLocal() as session:
-                                        await session.execute(
-                                            update(SubtaskItem)
-                                            .where(SubtaskItem.id == subtask_id)
-                                            .values(status="complete", s3_url=s3_url)
-                                        )
+                                        await session.execute(update(SubtaskItem).where(SubtaskItem.id == subtask_id).values(status="complete", s3_url=s3_url))
                                         await session.commit()
                                         
                             except Exception as sub_e:
@@ -101,20 +84,19 @@ async def process_tasks():
                                 result = str(sub_e)
                                 if parent_task_id and subtask_id:
                                     async with AsyncSessionLocal() as session:
-                                        await session.execute(
-                                            update(SubtaskItem)
-                                            .where(SubtaskItem.id == subtask_id)
-                                            .values(status="failed", s3_url="")
-                                        )
+                                        await session.execute(update(SubtaskItem).where(SubtaskItem.id == subtask_id).values(status="failed", s3_url=""))
                                         await session.commit()
                                 else:
                                     raise sub_e
                             
-                            # Check if we need to resume the orchestrator
+                            # DAG Resolution Loop with Pessimistic Locking
                             if parent_task_id and subtask_id:
                                 async with AsyncSessionLocal() as session:
+                                    # Use with_for_update() to lock the rows so other workers don't race
                                     res = await session.execute(
-                                        select(SubtaskItem).where(SubtaskItem.parent_task_id == parent_task_id)
+                                        select(SubtaskItem)
+                                        .where(SubtaskItem.parent_task_id == parent_task_id)
+                                        .with_for_update()
                                     )
                                     siblings = res.scalars().all()
                                     sibling_map = {s.id: s for s in siblings}
@@ -135,9 +117,11 @@ async def process_tasks():
                                                     await session.execute(update(SubtaskItem).where(SubtaskItem.id == s.id).values(status="queued"))
                                                     newly_ready.append(s)
                                                     changed = True
+                                                    
+                                    all_finished = all(s.status in ["complete", "failed"] for s in siblings)
                                     await session.commit()
                                     
-                                    # Queue newly ready tasks with context from prerequisites
+                                    # Queue newly ready tasks
                                     for task in newly_ready:
                                         context_texts = []
                                         for d in task.dependencies:
@@ -148,7 +132,7 @@ async def process_tasks():
                                                     resp = minio_client.get_object("agent-outputs", obj_name)
                                                     context_texts.append(f"--- Output of prerequisite task '{dep_task.description}': ---\n{resp.read().decode('utf-8')}")
                                                 except Exception as e:
-                                                    logger.error(f"Error fetching dependency output for {d}: {e}")
+                                                    pass
                                                 finally:
                                                     try:
                                                         resp.close()
@@ -160,86 +144,30 @@ async def process_tasks():
                                         if context_texts:
                                             enriched_prompt += "\n\nContext from prerequisite tasks:\n" + "\n\n".join(context_texts)
                                             
-                                        logger.info(f"Queueing dependent task {task.id} with context from {len(task.dependencies)} prerequisites.")
-                                        await redis_client.xadd("agent_tasks", {
+                                        await redis_client.xadd("worker_tasks", {
                                             "task_id": task.id,
                                             "parent_task_id": parent_task_id,
                                             "subtask_id": task.id,
                                             "prompt": enriched_prompt,
                                             "profile_name": task.profile_name
                                         })
-                                    
-                                    # LOG EXACT STATUSES
-                                    status_counts = {}
-                                    for s in siblings:
-                                        status_counts[s.status] = status_counts.get(s.status, 0) + 1
-                                    logger.info(f"Siblings status for {parent_task_id}: {status_counts}")
-                                    
-                                    # Check if ALL siblings are finished (complete or failed)
-                                    all_finished = all(s.status in ["complete", "failed"] for s in siblings)
-                                    
-                                if all_finished:
-                                    logger.info(f"All subtasks finished for {parent_task_id}. Resuming orchestrator.")
-                                    async with AsyncSessionLocal() as session:
-                                        res = await session.execute(select(Profile).where(Profile.name == "orchestrator"))
-                                        orch_profile = res.scalars().first()
                                         
-                                    executor = await setup_agent(orch_profile)
-                                    final_state = await executor.ainvoke(
-                                        Command(resume="workers_done"), 
-                                        config={"configurable": {"thread_id": parent_task_id}}
-                                    )
-                                    
-                                    # Extract the final result from the orchestrator's state
-                                    final_result_message = final_state['messages'][-1]
-                                    final_result_content = final_result_message.content if hasattr(final_result_message, 'content') else str(final_result_message)
-                                    
-                                    if isinstance(final_result_content, list):
-                                        text_parts = []
-                                        for part in final_result_content:
-                                            if isinstance(part, dict) and "text" in part:
-                                                text_parts.append(part["text"])
-                                            elif isinstance(part, str):
-                                                text_parts.append(part)
-                                            else:
-                                                text_parts.append(str(part))
-                                        final_result = "\n".join(text_parts)
-                                    elif not isinstance(final_result_content, str):
-                                        final_result = str(final_result_content)
-                                    else:
-                                        final_result = final_result_content
-                                    
-                                    # Write final result to Redis hash
-                                    await redis_client.hset(
-                                        f"task_results:{parent_task_id}",
-                                        mapping={"status": "completed", "result": final_result}
-                                    )
-                                    logger.info(f"Orchestrator task {parent_task_id} fully completed.")
+                                if all_finished:
+                                    logger.info(f"All subtasks finished for {parent_task_id}. Dispatching resume action.")
+                                    await redis_client.xadd("orchestrator_tasks", {
+                                        "task_id": parent_task_id,
+                                        "action": "resume"
+                                    })
                             
-                            # Save result to Redis Hash
-                            if profile_name == "orchestrator":
-                                # Don't mark as completed, it's just paused.
-                                await redis_client.hset(
-                                    f"task_results:{task_id}",
-                                    mapping={"status": "processing_subtasks", "result": result}
-                                )
-                            else:
-                                await redis_client.hset(
-                                    f"task_results:{task_id}",
-                                    mapping={"status": "completed", "result": result}
-                                )
-                            
-                            # Acknowledge the message
+                            # Workers don't update parent task status, only their own subtask results (handled above)
+                            # But we log it anyway
+                            await redis_client.hset(f"task_results:{task_id}", mapping={"status": "completed", "result": result})
                             await redis_client.xack(STREAM_NAME, GROUP_NAME, message_id)
-                            logger.info(f"Completed task {task_id}")
                             
                         except Exception as e:
                             logger.error(f"Error processing message {message_id}: {e}")
                             if 'task_id' in locals():
-                                await redis_client.hset(
-                                    f"task_results:{task_id}",
-                                    mapping={"status": "failed", "result": str(e)}
-                                )
+                                await redis_client.hset(f"task_results:{task_id}", mapping={"status": "failed", "result": str(e)})
         except Exception as e:
             logger.error(f"Queue error: {e}")
             await asyncio.sleep(1)

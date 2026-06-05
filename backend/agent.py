@@ -159,7 +159,7 @@ async def setup_agent(profile: Profile):
                     
                     # Only queue tasks with NO dependencies immediately
                     if not global_deps:
-                        await redis_client.xadd("agent_tasks", {
+                        await redis_client.xadd("worker_tasks", {
                             "task_id": subtask_id,
                             "parent_task_id": task_id,
                             "subtask_id": subtask_id,

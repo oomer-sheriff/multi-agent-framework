@@ -8,15 +8,50 @@ services:
       - redis_data:/data
     command: redis-server --appendonly yes
 
-  agent-backend:
-    build: 
+  api:
+    build:
       context: ./backend
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/agentdb
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - MCP_SERVER_URL=http://mcp-server:8001/sse
+    depends_on:
+      - redis
+      - db
+      - mcp-server
+    volumes:
+      - ./backend:/app
+
+  orchestrator-worker:
+    build:
+      context: ./backend
+    command: python orchestrator_worker.py
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/agentdb
+      - MCP_SERVER_URL=http://mcp-server:8001/sse
+    depends_on:
+      - redis
+      - db
+      - mcp-server
+    volumes:
+      - ./backend:/app
+
+  agent-worker:
+    build:
+      context: ./backend
+    command: python agent_worker.py
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/agentdb
       - MCP_SERVER_URL=http://mcp-server:8001/sse
     depends_on:
       - redis
@@ -39,6 +74,8 @@ services:
   mcp-server:
     build:
       context: ./mcp-tools
+    env_file:
+      - .env
     ports:
       - "8001:8001"
     volumes:
@@ -52,7 +89,7 @@ services:
     environment:
       - VITE_API_URL=http://localhost:8000
     depends_on:
-      - agent-backend
+      - api
     volumes:
       - ./frontend:/app
       - /app/node_modules

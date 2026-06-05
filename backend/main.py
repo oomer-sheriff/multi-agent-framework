@@ -5,7 +5,6 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import redis.asyncio as redis
-from queue_worker import process_tasks
 from db import get_db
 from models import Profile
 from init_db import init_db
@@ -38,8 +37,6 @@ class TaskResponse(BaseModel):
 async def startup_event():
     # Initialize Database
     await init_db()
-    # Start the background worker
-    asyncio.create_task(process_tasks())
 
 @app.post("/tasks", response_model=TaskResponse)
 async def create_task(request: TaskRequest):
@@ -51,9 +48,9 @@ async def create_task(request: TaskRequest):
         mapping={"status": "pending", "result": ""}
     )
     
-    # Push to redis stream
+    # Publish to Redis Stream for Orchestrator
     await redis_client.xadd(
-        STREAM_NAME,
+        "orchestrator_tasks",
         {"task_id": task_id, "prompt": request.prompt, "profile_name": request.profile_name}
     )
     
