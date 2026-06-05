@@ -40,4 +40,4 @@ def calculate(expression: str) -> str:
 
 if __name__ == "__main__":
     # Run over HTTP with Server-Sent Events on port 8001
-    mcp.run(transport="http", host="0.0.0.0", port=8001)
+    mcp.run(transport="sse", host="0.0.0.0", port=8001)

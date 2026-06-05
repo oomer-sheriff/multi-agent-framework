@@ -4,13 +4,27 @@ import redis.asyncio as redis
 from redis.exceptions import ResponseError
 import json
 import logging
-from agent import invoke_agent
+from agent import invoke_agent, setup_agent
 from db import AsyncSessionLocal
-from models import Profile
-from sqlalchemy import select
+from models import Profile, SubtaskItem
+from sqlalchemy import select, update
+from minio import Minio
+import io
+from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+minio_client = Minio(
+    "minio:9000",
+    access_key="minioadmin",
+    secret_key="minioadminpassword",
+    secure=False
+)
+
+def ensure_bucket():
+    if not minio_client.bucket_exists("agent-outputs"):
+        minio_client.make_bucket("agent-outputs")
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 redis_client = redis.from_url(REDIS_URL)
@@ -45,6 +59,8 @@ async def process_tasks():
                             task_id = message_data.get(b"task_id").decode("utf-8")
                             prompt = message_data.get(b"prompt").decode("utf-8")
                             profile_name = message_data.get(b"profile_name", b"default").decode("utf-8")
+                            parent_task_id = message_data.get(b"parent_task_id", b"").decode("utf-8") if b"parent_task_id" in message_data else None
+                            subtask_id = message_data.get(b"subtask_id", b"").decode("utf-8") if b"subtask_id" in message_data else None
                             
                             logger.info(f"Processing task {task_id}: {prompt} with profile {profile_name}")
                             
@@ -57,7 +73,46 @@ async def process_tasks():
                                 raise ValueError(f"Profile {profile_name} not found")
                             
                             # Invoke LangGraph agent
-                            result = await invoke_agent(prompt, profile=profile)
+                            result = await invoke_agent(prompt, profile=profile, task_id=task_id)
+                            
+                            if parent_task_id and subtask_id:
+                                ensure_bucket()
+                                obj_name = f"{parent_task_id}/{subtask_id}.txt"
+                                result_bytes = result.encode('utf-8')
+                                minio_client.put_object(
+                                    "agent-outputs",
+                                    obj_name,
+                                    io.BytesIO(result_bytes),
+                                    len(result_bytes)
+                                )
+                                s3_url = f"s3://agent-outputs/{obj_name}"
+                                
+                                async with AsyncSessionLocal() as session:
+                                    await session.execute(
+                                        update(SubtaskItem)
+                                        .where(SubtaskItem.id == subtask_id)
+                                        .values(status="complete", s3_url=s3_url)
+                                    )
+                                    await session.commit()
+                                    
+                                    # Check if all siblings are complete
+                                    res = await session.execute(
+                                        select(SubtaskItem).where(SubtaskItem.parent_task_id == parent_task_id)
+                                    )
+                                    siblings = res.scalars().all()
+                                    all_complete = all(s.status == "complete" for s in siblings)
+                                    
+                                if all_complete:
+                                    logger.info(f"All subtasks complete for {parent_task_id}. Resuming orchestrator.")
+                                    async with AsyncSessionLocal() as session:
+                                        res = await session.execute(select(Profile).where(Profile.name == "orchestrator"))
+                                        orch_profile = res.scalars().first()
+                                        
+                                    executor = await setup_agent(orch_profile)
+                                    await executor.ainvoke(
+                                        Command(resume="workers_done"), 
+                                        config={"configurable": {"thread_id": parent_task_id}}
+                                    )
                             
                             # Save result to Redis Hash
                             await redis_client.hset(

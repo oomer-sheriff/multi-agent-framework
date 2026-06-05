@@ -10,3 +10,13 @@ class Profile(Base):
     system_prompt = Column(Text, nullable=False)
     mcp_servers = Column(JSON, nullable=False, default=list)
     workflow_config = Column(JSON, nullable=False, default=dict)
+
+class SubtaskItem(Base):
+    __tablename__ = "subtasks"
+    
+    id = Column(String, primary_key=True, index=True)
+    parent_task_id = Column(String, index=True, nullable=False)
+    description = Column(Text, nullable=False)
+    profile_name = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="waiting")
+    s3_url = Column(String, nullable=True)

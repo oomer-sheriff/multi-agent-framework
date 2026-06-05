@@ -19,18 +19,40 @@ DEFAULT_WORKFLOW = {
     ]
 }
 
+ORCHESTRATOR_WORKFLOW = {
+    "entry_point": "planner",
+    "nodes": [
+        {"name": "planner", "type": "planner"},
+        {"name": "dispatcher", "type": "dispatcher"},
+        {"name": "reviewer", "type": "reviewer"}
+    ],
+    "edges": [
+        {"from": "planner", "to": "dispatcher"},
+        {"from": "dispatcher", "to": "reviewer"}
+    ],
+    "conditional_edges": [
+        {"from": "reviewer", "condition": "should_replan"}
+    ]
+}
+
 DEFAULT_PROFILES = [
     {
         "name": "default",
         "system_prompt": "You are a helpful AI assistant. You have access to various tools. Use them to answer the user's questions.",
-        "mcp_servers": [os.environ.get("MCP_SERVER_URL", "http://mcp-server:8001/mcp")],
+        "mcp_servers": [os.environ.get("MCP_SERVER_URL", "http://mcp-server:8001/sse")],
         "workflow_config": DEFAULT_WORKFLOW
     },
     {
         "name": "researcher",
         "system_prompt": "You are an expert researcher. You focus on finding accurate information from the web and summarizing it clearly.",
-        "mcp_servers": [os.environ.get("MCP_SERVER_URL", "http://mcp-server:8001/mcp")],
+        "mcp_servers": [os.environ.get("MCP_SERVER_URL", "http://mcp-server:8001/sse")],
         "workflow_config": DEFAULT_WORKFLOW
+    },
+    {
+        "name": "orchestrator",
+        "system_prompt": "You are the Orchestrator. Your job is to break down complex tasks into subtasks and delegate them to other specialized agents. You must review their work and ensure the final user request is met.",
+        "mcp_servers": [],
+        "workflow_config": ORCHESTRATOR_WORKFLOW
     }
 ]
 
