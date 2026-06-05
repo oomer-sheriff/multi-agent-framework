@@ -41,7 +41,7 @@ class AgentState(TypedDict):
     review: dict
 
 # Determine the model from env, default to gemini
-MODEL_NAME = os.environ.get("LLM_MODEL", "gemini/gemma-4-26b-a4b-it")
+MODEL_NAME = os.environ.get("LLM_MODEL", "gemini/gemma-4-31b-it")
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8001/mcp")
 
 # Initialize ChatLiteLLM
@@ -183,22 +183,28 @@ async def setup_agent(profile: Profile):
         messages = state['messages']
         results = state.get('results', [])
         
+        # messages[0] is the SystemMessage, messages[1] is the user prompt
+        original_prompt = messages[1].content if len(messages) > 1 else messages[0].content
+        
         # Format results for the reviewer
-        results_str = "\\n".join([f"Task ({r['profile']}): {r['task']}\\nResult: {r['result']}" for r in results])
-        review_prompt = f"Original Request:\\n{messages[0].content}\\n\\nExecution Results:\\n{results_str}\\n\\nReview the results. Have we fully satisfied the original request?"
+        results_str = "\n".join([f"Task ({r['profile']}): {r['task']}\nResult: {r['result']}" for r in results])
+        review_prompt = f"Original Request:\n{original_prompt}\n\nExecution Results:\n{results_str}\n\nReview the results. Have we fully satisfied the original request?"
         
+        logger.info(f"[run_reviewer] Review prompt: {review_prompt[:500]}")
         reviewer_llm = agent_llm.with_structured_output(Review)
-        review = await reviewer_llm.ainvoke([HumanMessage(content=review_prompt)])
+        review_result = await reviewer_llm.ainvoke(review_prompt)
         
-        if review.is_complete:
-            # Generate final response
-            final_prompt = f"The tasks are complete. Based on these results:\\n{results_str}\\n\\nProvide the final answer to the user."
-            response = await agent_llm.ainvoke([HumanMessage(content=final_prompt)])
-            return {"review": review.model_dump(), "messages": [response]}
+        # if complete, we should generate a final human response
+        if review_result.is_complete:
+            final_llm = agent_llm
+            final_prompt = f"Original Request:\n{original_prompt}\n\nResults:\n{results_str}\n\nProvide a final comprehensive answer to the user based on these results."
+            final_response = await final_llm.ainvoke(final_prompt)
+            logger.info(f"[run_reviewer] Final Response: {final_response.content[:500]}")
+            return {"messages": [final_response], "review": review_result.model_dump()}
         else:
             # Return feedback to trigger replan
-            feedback_msg = AIMessage(content=f"Review Feedback: {review.feedback}. We need to adjust our plan and continue.")
-            return {"review": review.model_dump(), "messages": [feedback_msg]}
+            feedback_msg = AIMessage(content=f"Review Feedback: {review_result.feedback}. We need to adjust our plan and continue.")
+            return {"review": review_result.model_dump(), "messages": [feedback_msg]}
         
     def should_continue(state: AgentState):
         messages = state['messages']
