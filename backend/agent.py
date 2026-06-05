@@ -41,7 +41,7 @@ class AgentState(TypedDict):
     review: dict
 
 # Determine the model from env, default to gemini
-MODEL_NAME = os.environ.get("LLM_MODEL", "gemini/gemini-2.5-flash")
+MODEL_NAME = os.environ.get("LLM_MODEL", "gemini/gemma-4-26b-a4b-it")
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8001/mcp")
 
 # Initialize ChatLiteLLM
@@ -300,8 +300,14 @@ async def invoke_agent(prompt: str, history: list = None, profile: Profile = Non
     
     if not result or 'messages' not in result or not result['messages']:
         logger.error(f"Graph result was empty or had no messages: {result}")
-        return "Error: Graph did not return any messages."
+        return "Error: Graph did not return any messages. The AI model may have failed or hit a rate limit."
         
     # The last message is from the AI
-    ai_response = result['messages'][-1].content
+    last_message = result['messages'][-1]
+    
+    # If the execution was paused by an interrupt, the last message is just the user prompt
+    if profile.name == "orchestrator" and getattr(last_message, 'type', '') == 'human':
+        return "Processing subtasks..."
+        
+    ai_response = last_message.content if hasattr(last_message, 'content') else str(last_message)
     return ai_response

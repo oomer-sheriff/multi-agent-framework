@@ -72,53 +72,88 @@ async def process_tasks():
                             if not profile:
                                 raise ValueError(f"Profile {profile_name} not found")
                             
-                            # Invoke LangGraph agent
-                            result = await invoke_agent(prompt, profile=profile, task_id=task_id)
-                            
-                            if parent_task_id and subtask_id:
-                                ensure_bucket()
-                                obj_name = f"{parent_task_id}/{subtask_id}.txt"
-                                result_bytes = result.encode('utf-8')
-                                minio_client.put_object(
-                                    "agent-outputs",
-                                    obj_name,
-                                    io.BytesIO(result_bytes),
-                                    len(result_bytes)
-                                )
-                                s3_url = f"s3://agent-outputs/{obj_name}"
+                            try:
+                                # Invoke LangGraph agent
+                                result = await invoke_agent(prompt, profile=profile, task_id=task_id)
                                 
-                                async with AsyncSessionLocal() as session:
-                                    await session.execute(
-                                        update(SubtaskItem)
-                                        .where(SubtaskItem.id == subtask_id)
-                                        .values(status="complete", s3_url=s3_url)
+                                if parent_task_id and subtask_id:
+                                    ensure_bucket()
+                                    obj_name = f"{parent_task_id}/{subtask_id}.txt"
+                                    result_bytes = result.encode('utf-8')
+                                    minio_client.put_object(
+                                        "agent-outputs",
+                                        obj_name,
+                                        io.BytesIO(result_bytes),
+                                        len(result_bytes)
                                     )
-                                    await session.commit()
+                                    s3_url = f"s3://agent-outputs/{obj_name}"
                                     
-                                    # Check if all siblings are complete
+                                    async with AsyncSessionLocal() as session:
+                                        await session.execute(
+                                            update(SubtaskItem)
+                                            .where(SubtaskItem.id == subtask_id)
+                                            .values(status="complete", s3_url=s3_url)
+                                        )
+                                        await session.commit()
+                                        
+                            except Exception as sub_e:
+                                logger.error(f"Error executing subtask {task_id}: {sub_e}")
+                                result = str(sub_e)
+                                if parent_task_id and subtask_id:
+                                    async with AsyncSessionLocal() as session:
+                                        await session.execute(
+                                            update(SubtaskItem)
+                                            .where(SubtaskItem.id == subtask_id)
+                                            .values(status="failed", s3_url="")
+                                        )
+                                        await session.commit()
+                                else:
+                                    raise sub_e
+                            
+                            # Check if we need to resume the orchestrator
+                            if parent_task_id and subtask_id:
+                                async with AsyncSessionLocal() as session:
                                     res = await session.execute(
                                         select(SubtaskItem).where(SubtaskItem.parent_task_id == parent_task_id)
                                     )
                                     siblings = res.scalars().all()
-                                    all_complete = all(s.status == "complete" for s in siblings)
+                                    all_finished = all(s.status in ["complete", "failed"] for s in siblings)
                                     
-                                if all_complete:
-                                    logger.info(f"All subtasks complete for {parent_task_id}. Resuming orchestrator.")
+                                if all_finished:
+                                    logger.info(f"All subtasks finished for {parent_task_id}. Resuming orchestrator.")
                                     async with AsyncSessionLocal() as session:
                                         res = await session.execute(select(Profile).where(Profile.name == "orchestrator"))
                                         orch_profile = res.scalars().first()
                                         
                                     executor = await setup_agent(orch_profile)
-                                    await executor.ainvoke(
+                                    final_state = await executor.ainvoke(
                                         Command(resume="workers_done"), 
                                         config={"configurable": {"thread_id": parent_task_id}}
                                     )
+                                    
+                                    # Extract the final result from the orchestrator's state
+                                    final_result_message = final_state['messages'][-1]
+                                    final_result = final_result_message.content if hasattr(final_result_message, 'content') else str(final_result_message)
+                                    
+                                    # Write final result to Redis hash
+                                    await redis_client.hset(
+                                        f"task_results:{parent_task_id}",
+                                        mapping={"status": "completed", "result": final_result}
+                                    )
+                                    logger.info(f"Orchestrator task {parent_task_id} fully completed.")
                             
                             # Save result to Redis Hash
-                            await redis_client.hset(
-                                f"task_results:{task_id}",
-                                mapping={"status": "completed", "result": result}
-                            )
+                            if profile_name == "orchestrator":
+                                # Don't mark as completed, it's just paused.
+                                await redis_client.hset(
+                                    f"task_results:{task_id}",
+                                    mapping={"status": "processing_subtasks", "result": result}
+                                )
+                            else:
+                                await redis_client.hset(
+                                    f"task_results:{task_id}",
+                                    mapping={"status": "completed", "result": result}
+                                )
                             
                             # Acknowledge the message
                             await redis_client.xack(STREAM_NAME, GROUP_NAME, message_id)
