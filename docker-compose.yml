@@ -1,0 +1,113 @@
+version: '3.8'
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  api:
+    build:
+      context: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/agentdb
+      - MCP_SERVER_URL=http://mcp-server:8001/sse
+    depends_on:
+      - redis
+      - db
+      - mcp-server
+    volumes:
+      - ./backend:/app
+
+  orchestrator-worker:
+    build:
+      context: ./backend
+    command: python -m app.workers.orchestrator_worker
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/agentdb
+      - MCP_SERVER_URL=http://mcp-server:8001/sse
+    depends_on:
+      - redis
+      - db
+      - mcp-server
+    volumes:
+      - ./backend:/app
+
+  agent-worker:
+    build:
+      context: ./backend
+    command: python -m app.workers.agent_worker
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/agentdb
+      - MCP_SERVER_URL=http://mcp-server:8001/sse
+    depends_on:
+      - redis
+      - db
+      - mcp-server
+    volumes:
+      - ./backend:/app
+
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: agentdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  mcp-server:
+    build:
+      context: ./mcp-tools
+    env_file:
+      - .env
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./mcp-tools:/app
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - api
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadminpassword
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+volumes:
+  redis_data:
+  db_data:
+  minio_data:
