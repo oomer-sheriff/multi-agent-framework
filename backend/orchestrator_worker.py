@@ -26,6 +26,75 @@ async def setup_redis():
         if "BUSYGROUP" not in str(e):
             logger.error(f"Error creating group: {e}")
 
+async def handle_message(message_id, message_data):
+    try:
+        task_id = message_data.get(b"task_id").decode("utf-8")
+        action = message_data.get(b"action", b"").decode("utf-8") if b"action" in message_data else None
+        
+        if action == "resume":
+            logger.info(f"Resuming orchestrator for task {task_id}")
+            async with AsyncSessionLocal() as session:
+                from sqlalchemy import select
+                res = await session.execute(select(Profile).where(Profile.name == "orchestrator"))
+                orch_profile = res.scalars().first()
+                
+            executor = await setup_agent(orch_profile)
+            final_state = await executor.ainvoke(
+                Command(resume="workers_done"), 
+                config={"configurable": {"thread_id": task_id}}
+            )
+            
+            # Extract final result
+            final_result_message = final_state['messages'][-1]
+            final_result_content = final_result_message.content if hasattr(final_result_message, 'content') else str(final_result_message)
+            
+            if isinstance(final_result_content, list):
+                text_parts = []
+                for part in final_result_content:
+                    if isinstance(part, dict) and "text" in part:
+                        text_parts.append(part["text"])
+                    elif isinstance(part, str):
+                        text_parts.append(part)
+                    else:
+                        text_parts.append(str(part))
+                final_result = "\n".join(text_parts)
+            elif not isinstance(final_result_content, str):
+                final_result = str(final_result_content)
+            else:
+                final_result = final_result_content
+            
+            await redis_client.hset(
+                f"task_results:{task_id}",
+                mapping={"status": "completed", "result": final_result}
+            )
+            logger.info(f"Orchestrator task {task_id} fully completed.")
+        else:
+            prompt = message_data.get(b"prompt").decode("utf-8")
+            profile_name = message_data.get(b"profile_name", b"orchestrator").decode("utf-8")
+            
+            logger.info(f"Processing orchestrator task {task_id}")
+            
+            async with AsyncSessionLocal() as session:
+                from sqlalchemy import select
+                result = await session.execute(select(Profile).where(Profile.name == profile_name))
+                profile = result.scalars().first()
+                
+            result_text = await invoke_agent(prompt, profile=profile, task_id=task_id)
+            
+            await redis_client.hset(
+                f"task_results:{task_id}",
+                mapping={"status": "processing_subtasks", "result": result_text}
+            )
+        
+        await redis_client.xack(STREAM_NAME, GROUP_NAME, message_id)
+    except Exception as e:
+        logger.error(f"Error processing message {message_id}: {e}")
+        if 'task_id' in locals():
+            await redis_client.hset(
+                f"task_results:{task_id}",
+                mapping={"status": "failed", "result": str(e)}
+            )
+
 async def process_tasks():
     await setup_redis()
     logger.info("Started Orchestrator Worker...")
@@ -39,79 +108,32 @@ async def process_tasks():
             if response:
                 for stream, messages in response:
                     for message_id, message_data in messages:
-                        try:
-                            task_id = message_data.get(b"task_id").decode("utf-8")
-                            action = message_data.get(b"action", b"").decode("utf-8") if b"action" in message_data else None
-                            
-                            if action == "resume":
-                                logger.info(f"Resuming orchestrator for task {task_id}")
-                                async with AsyncSessionLocal() as session:
-                                    from sqlalchemy import select
-                                    res = await session.execute(select(Profile).where(Profile.name == "orchestrator"))
-                                    orch_profile = res.scalars().first()
-                                    
-                                executor = await setup_agent(orch_profile)
-                                final_state = await executor.ainvoke(
-                                    Command(resume="workers_done"), 
-                                    config={"configurable": {"thread_id": task_id}}
-                                )
-                                
-                                # Extract final result
-                                final_result_message = final_state['messages'][-1]
-                                final_result_content = final_result_message.content if hasattr(final_result_message, 'content') else str(final_result_message)
-                                
-                                if isinstance(final_result_content, list):
-                                    text_parts = []
-                                    for part in final_result_content:
-                                        if isinstance(part, dict) and "text" in part:
-                                            text_parts.append(part["text"])
-                                        elif isinstance(part, str):
-                                            text_parts.append(part)
-                                        else:
-                                            text_parts.append(str(part))
-                                    final_result = "\n".join(text_parts)
-                                elif not isinstance(final_result_content, str):
-                                    final_result = str(final_result_content)
-                                else:
-                                    final_result = final_result_content
-                                
-                                await redis_client.hset(
-                                    f"task_results:{task_id}",
-                                    mapping={"status": "completed", "result": final_result}
-                                )
-                                logger.info(f"Orchestrator task {task_id} fully completed.")
-                            else:
-                                prompt = message_data.get(b"prompt").decode("utf-8")
-                                profile_name = message_data.get(b"profile_name", b"orchestrator").decode("utf-8")
-                                
-                                logger.info(f"Processing orchestrator task {task_id}")
-                                
-                                async with AsyncSessionLocal() as session:
-                                    from sqlalchemy import select
-                                    result = await session.execute(select(Profile).where(Profile.name == profile_name))
-                                    profile = result.scalars().first()
-                                    
-                                result_text = await invoke_agent(prompt, profile=profile, task_id=task_id)
-                                
-                                await redis_client.hset(
-                                    f"task_results:{task_id}",
-                                    mapping={"status": "processing_subtasks", "result": result_text}
-                                )
-                            
-                            await redis_client.xack(STREAM_NAME, GROUP_NAME, message_id)
-                        except Exception as e:
-                            logger.error(f"Error processing message {message_id}: {e}")
-                            if 'task_id' in locals():
-                                await redis_client.hset(
-                                    f"task_results:{task_id}",
-                                    mapping={"status": "failed", "result": str(e)}
-                                )
+                        await handle_message(message_id, message_data)
         except Exception as e:
             logger.error(f"Queue error: {e}")
             await asyncio.sleep(1)
 
+async def reclaim_dead_tasks():
+    min_idle_time = 600000 # 10 minutes
+    while True:
+        try:
+            pending_msgs = await redis_client.xpending_range(STREAM_NAME, GROUP_NAME, min="-", max="+", count=100)
+            for msg in pending_msgs:
+                if msg['time_since_delivered'] > min_idle_time:
+                    logger.warning(f"Reclaiming dead message {msg['message_id']} from {msg['consumer']}")
+                    claimed = await redis_client.xclaim(STREAM_NAME, GROUP_NAME, CONSUMER_NAME, min_idle_time, [msg['message_id']])
+                    if claimed:
+                        for msg_id, msg_data in claimed:
+                            await handle_message(msg_id, msg_data)
+        except Exception as e:
+            logger.error(f"Error in reclaim loop: {e}")
+        await asyncio.sleep(60)
+
 async def start_worker():
-    await process_tasks()
+    await asyncio.gather(
+        process_tasks(),
+        reclaim_dead_tasks()
+    )
 
 if __name__ == "__main__":
     asyncio.run(start_worker())
